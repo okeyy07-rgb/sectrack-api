@@ -17,6 +17,8 @@ info:
 
     Semua waktu disimpan dan dikembalikan dalam UTC (ISO 8601).
 servers:
+  - url: https://nazhwa.pythonanywhere.com
+    description: Demo online (PythonAnywhere)
   - url: http://127.0.0.1:5000
     description: Lokal
 security:

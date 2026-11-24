@@ -2,6 +2,8 @@
 
 REST API sederhana (MVP) untuk membantu admin lab/jaringan kampus **mencatat aset TI, katalog kerentanan, temuan kerentanan per aset, laporan insiden keamanan, dan jejak audit**. Dibuat untuk UTS Pemrograman Web Lanjut (TK070).
 
+**Demo online:** https://nazhwa.pythonanywhere.com (Swagger UI: https://nazhwa.pythonanywhere.com/docs, health check: `/api/v1/health`). Pakai salah satu API key demo (lihat daftar user demo di bawah) lewat tombol *Authorize*.
+
 > Semua data di project ini **simulasi**. Tidak ada scanning atau pengujian ke sistem pihak lain.
 
 ## Fitur utama
@@ -321,22 +323,28 @@ curl -X POST http://127.0.0.1:5000/api/v1/incidents \
 
 ## Deploy demo (PythonAnywhere, gratis)
 
+Versi yang sedang berjalan: https://nazhwa.pythonanywhere.com. Langkah yang dipakai:
+
 1. Daftar di https://www.pythonanywhere.com, buka **Consoles → Bash**.
 2. `git clone https://github.com/okeyy07-rgb/sectrack-api.git && cd sectrack-api`
-3. `python3.10 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`
-4. `flask db upgrade && flask seed`
-5. Tab **Web → Add a new web app → Manual configuration (Python 3.10)**.
-6. Isi **Virtualenv** dengan `/home/<username>/sectrack-api/venv`.
-7. Edit file **WSGI configuration**, ganti isinya dengan:
+3. `python3.13 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`
+4. Buat file `.env` berisi `FLASK_APP=wsgi.py`, `FLASK_ENV_NAME=production`, dan `SECRET_KEY` acak
+   (misalnya dari `python -c "import secrets; print(secrets.token_hex(32))"`).
+5. `flask db upgrade && flask seed`
+6. Tab **Web → Add a new web app → Manual configuration (Python 3.13)**.
+7. Isi **Virtualenv** dengan `/home/<username>/sectrack-api/venv`.
+8. Edit file **WSGI configuration**, ganti isinya dengan:
    ```python
    import sys, os
    path = "/home/<username>/sectrack-api"
    if path not in sys.path:
        sys.path.insert(0, path)
    os.chdir(path)
+   from dotenv import load_dotenv
+   load_dotenv(os.path.join(path, ".env"))
    from wsgi import app as application
    ```
-8. Klik **Reload**. API bisa diakses di `https://<username>.pythonanywhere.com/api/v1/health`.
+9. Klik **Reload**. API bisa diakses di `https://<username>.pythonanywhere.com/api/v1/health`.
 
 Alternatif lain: Render/Railway dengan start command `gunicorn wsgi:app`.
 
