@@ -55,7 +55,7 @@ Alurnya: **request → controller → (validasi di view/schema) → model/ORM �
 Butuh Python 3.10 atau lebih baru.
 
 ```bash
-git clone https://github.com/<username>/sectrack-api.git
+git clone https://github.com/okeyy07-rgb/sectrack-api.git
 cd sectrack-api
 
 python -m venv venv
@@ -322,7 +322,7 @@ curl -X POST http://127.0.0.1:5000/api/v1/incidents \
 ## Deploy demo (PythonAnywhere, gratis)
 
 1. Daftar di https://www.pythonanywhere.com, buka **Consoles → Bash**.
-2. `git clone https://github.com/<username>/sectrack-api.git && cd sectrack-api`
+2. `git clone https://github.com/okeyy07-rgb/sectrack-api.git && cd sectrack-api`
 3. `python3.10 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`
 4. `flask db upgrade && flask seed`
 5. Tab **Web → Add a new web app → Manual configuration (Python 3.10)**.
