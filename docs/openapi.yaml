@@ -1,0 +1,745 @@
+openapi: 3.0.3
+info:
+  title: SecTrack API
+  version: 1.0.0
+  description: |
+    REST API untuk mencatat aset TI, katalog kerentanan, temuan kerentanan per aset,
+    laporan insiden keamanan, dan audit log. Dibuat untuk UTS Pemrograman Web Lanjut (TK070).
+
+    **Autentikasi:** kirim header `X-API-Key`. API key demo (hasil `flask seed`):
+    - admin: `stk_demo_admin_key`
+    - analyst: `stk_demo_analyst_key`
+    - reporter: `stk_demo_reporter_key`
+
+    **Format response sukses:** `{"success": true, "message"?: "...", "data": ..., "meta"?: {...}}`
+
+    **Format response error:** `{"success": false, "error": {"code": "...", "message": "...", "details"?: {...}}}`
+
+    Semua waktu disimpan dan dikembalikan dalam UTC (ISO 8601).
+servers:
+  - url: http://127.0.0.1:5000
+    description: Lokal
+security:
+  - ApiKeyAuth: []
+tags:
+  - name: Umum
+  - name: Users
+    description: Kelola pengguna (khusus admin)
+  - name: Assets
+    description: Aset TI yang dilindungi
+  - name: Vulnerabilities
+    description: Katalog kerentanan
+  - name: Findings
+    description: Temuan kerentanan pada aset
+  - name: Incidents
+    description: Laporan insiden keamanan
+  - name: Audit Logs
+    description: Jejak audit (read-only, khusus admin)
+  - name: Stats
+    description: Ringkasan untuk dashboard
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [Umum]
+      summary: Health check (tanpa autentikasi)
+      security: []
+      responses:
+        "200":
+          description: API dan database berjalan
+          content:
+            application/json:
+              example: { success: true, data: { status: ok, database: connected } }
+
+  # ------------------------------------------------------------------ USERS
+  /api/v1/users/me:
+    get:
+      tags: [Users]
+      summary: Profil user dari API key yang dipakai
+      responses:
+        "200": { $ref: "#/components/responses/UserOne" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/users:
+    get:
+      tags: [Users]
+      summary: Daftar user (admin)
+      parameters:
+        - $ref: "#/components/parameters/q"
+        - { name: role, in: query, schema: { $ref: "#/components/schemas/Role" } }
+        - { name: sort, in: query, schema: { type: string, default: name, enum: [name, -name, email, -email, role, -role, created_at, -created_at] } }
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200": { $ref: "#/components/responses/UserList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Users]
+      summary: Buat user baru (admin). API key hanya ditampilkan sekali.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserCreate" }
+            example: { name: Dimas, email: dimas@sectrack.local, password: rahasia123, role: analyst }
+      responses:
+        "201":
+          description: User dibuat
+          headers: { Location: { schema: { type: string } } }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessBase"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/User"
+                          - type: object
+                            properties: { api_key: { type: string, example: stk_Xy12... } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/users/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [Users]
+      summary: Detail user (admin)
+      responses:
+        "200": { $ref: "#/components/responses/UserOne" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Users]
+      summary: Ubah sebagian data user (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserUpdate" }
+            example: { is_active: false }
+      responses:
+        "200": { $ref: "#/components/responses/UserOne" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Users]
+      summary: Hapus user (admin). Ditolak kalau user masih punya data terkait.
+      responses:
+        "204": { description: Terhapus }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v1/users/{id}/rotate-key:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [Users]
+      summary: Buat API key baru, key lama langsung tidak berlaku (admin)
+      responses:
+        "200":
+          description: Key baru
+          content:
+            application/json:
+              example: { success: true, message: "API key baru dibuat.", data: { id: 4, api_key: "stk_..." } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ------------------------------------------------------------------ ASSETS
+  /api/v1/assets:
+    get:
+      tags: [Assets]
+      summary: Daftar aset (search, filter, sorting, pagination)
+      parameters:
+        - $ref: "#/components/parameters/q"
+        - { name: asset_type, in: query, schema: { $ref: "#/components/schemas/AssetType" } }
+        - { name: criticality, in: query, schema: { $ref: "#/components/schemas/Level" } }
+        - { name: owner_id, in: query, schema: { type: integer } }
+        - { name: sort, in: query, schema: { type: string, default: name, enum: [name, -name, asset_type, -asset_type, created_at, -created_at, updated_at, -updated_at] } }
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssetList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Assets]
+      summary: Tambah aset (admin, analyst)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssetInput" }
+            example: { name: srv-backup-01, asset_type: server, ip_address: 10.10.1.40, location: Ruang Server Lt.2, criticality: high }
+      responses:
+        "201": { $ref: "#/components/responses/AssetOne" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/assets/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [Assets]
+      summary: Detail aset
+      responses:
+        "200": { $ref: "#/components/responses/AssetOne" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Assets]
+      summary: Ganti seluruh data aset (field opsional yang tidak dikirim jadi null)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssetInput" }
+      responses:
+        "200": { $ref: "#/components/responses/AssetOne" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    patch:
+      tags: [Assets]
+      summary: Ubah sebagian data aset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssetPatch" }
+            example: { criticality: critical }
+      responses:
+        "200": { $ref: "#/components/responses/AssetOne" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Assets]
+      summary: Hapus aset (admin). Ditolak 409 kalau masih punya temuan/insiden.
+      responses:
+        "204": { description: Terhapus }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  # ------------------------------------------------------------------ VULNERABILITIES
+  /api/v1/vulnerabilities:
+    get:
+      tags: [Vulnerabilities]
+      summary: Daftar kerentanan
+      parameters:
+        - $ref: "#/components/parameters/q"
+        - { name: severity, in: query, schema: { $ref: "#/components/schemas/Level" } }
+        - { name: min_cvss, in: query, schema: { type: number, example: 7 } }
+        - { name: sort, in: query, schema: { type: string, default: -cvss_score, enum: [title, -title, cve_id, -cve_id, cvss_score, -cvss_score, created_at, -created_at] } }
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VulnerabilityList" }
+    post:
+      tags: [Vulnerabilities]
+      summary: Tambah kerentanan (admin, analyst). Severity harus sesuai rentang CVSS.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VulnerabilityInput" }
+            example: { cve_id: CVE-2024-3094, title: Backdoor pada xz-utils, severity: critical, cvss_score: 10 }
+      responses:
+        "201": { $ref: "#/components/responses/VulnerabilityOne" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/vulnerabilities/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [Vulnerabilities]
+      summary: Detail kerentanan
+      responses:
+        "200": { $ref: "#/components/responses/VulnerabilityOne" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Vulnerabilities]
+      summary: Ganti seluruh data kerentanan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VulnerabilityInput" }
+      responses:
+        "200": { $ref: "#/components/responses/VulnerabilityOne" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    patch:
+      tags: [Vulnerabilities]
+      summary: Ubah sebagian data kerentanan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VulnerabilityPatch" }
+            example: { remediation: Upgrade ke versi terbaru. }
+      responses:
+        "200": { $ref: "#/components/responses/VulnerabilityOne" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Vulnerabilities]
+      summary: Hapus kerentanan (admin). Ditolak 409 kalau masih dipakai temuan.
+      responses:
+        "204": { description: Terhapus }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  # ------------------------------------------------------------------ FINDINGS
+  /api/v1/findings:
+    get:
+      tags: [Findings]
+      summary: Daftar temuan
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/FindingStatus" } }
+        - { name: asset_id, in: query, schema: { type: integer } }
+        - { name: vulnerability_id, in: query, schema: { type: integer } }
+        - { name: severity, in: query, description: Severity milik kerentanannya, schema: { $ref: "#/components/schemas/Level" } }
+        - { name: sort, in: query, schema: { type: string, default: -found_at, enum: [found_at, -found_at, status, -status, created_at, -created_at, updated_at, -updated_at] } }
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FindingList" }
+    post:
+      tags: [Findings]
+      summary: Catat temuan kerentanan pada aset (admin, analyst)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FindingCreate" }
+            example: { asset_id: 6, vulnerability_id: 8, notes: Ditemukan saat pemeriksaan rutin. }
+      responses:
+        "201": { $ref: "#/components/responses/FindingOne" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/findings/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [Findings]
+      summary: Detail temuan
+      responses:
+        "200": { $ref: "#/components/responses/FindingOne" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Findings]
+      summary: Ubah status/catatan temuan. resolved_at terisi otomatis saat status resolved.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FindingUpdate" }
+            example: { status: resolved, notes: Sudah di-patch. }
+      responses:
+        "200": { $ref: "#/components/responses/FindingOne" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Findings]
+      summary: Hapus temuan (admin)
+      responses:
+        "204": { description: Terhapus }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ------------------------------------------------------------------ INCIDENTS
+  /api/v1/incidents:
+    get:
+      tags: [Incidents]
+      summary: Daftar insiden
+      parameters:
+        - $ref: "#/components/parameters/q"
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/IncidentStatus" } }
+        - { name: category, in: query, schema: { $ref: "#/components/schemas/IncidentCategory" } }
+        - { name: severity, in: query, schema: { $ref: "#/components/schemas/Level" } }
+        - { name: asset_id, in: query, schema: { type: integer } }
+        - { name: assignee_id, in: query, schema: { type: integer } }
+        - { name: reporter_id, in: query, schema: { type: integer } }
+        - { name: from, in: query, description: occurred_at >= tanggal ini, schema: { type: string, example: "2026-11-01" } }
+        - { name: to, in: query, description: occurred_at <= tanggal ini, schema: { type: string, example: "2026-11-30T23:59:59" } }
+        - { name: sort, in: query, schema: { type: string, default: -occurred_at, enum: [occurred_at, -occurred_at, created_at, -created_at, updated_at, -updated_at, title, -title] } }
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IncidentList" }
+    post:
+      tags: [Incidents]
+      summary: Laporkan insiden (semua role). Reporter tidak bisa set assignee/status.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IncidentInput" }
+            example:
+              title: Wi-Fi lab minta login aneh
+              description: Muncul halaman login palsu saat konek ke Wi-Fi lab.
+              category: phishing
+              severity: medium
+              occurred_at: "2026-11-20T09:00:00+07:00"
+      responses:
+        "201": { $ref: "#/components/responses/IncidentOne" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/incidents/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [Incidents]
+      summary: Detail insiden
+      responses:
+        "200": { $ref: "#/components/responses/IncidentOne" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Incidents]
+      summary: Ganti seluruh data insiden (admin, analyst)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IncidentInput" }
+      responses:
+        "200": { $ref: "#/components/responses/IncidentOne" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    patch:
+      tags: [Incidents]
+      summary: Ubah sebagian (misalnya status/assignee). resolved_at otomatis saat resolved/closed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IncidentPatch" }
+            example: { status: investigating, assignee_id: 2 }
+      responses:
+        "200": { $ref: "#/components/responses/IncidentOne" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Incidents]
+      summary: Hapus insiden (admin)
+      responses:
+        "204": { description: Terhapus }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ------------------------------------------------------------------ AUDIT & STATS
+  /api/v1/audit-logs:
+    get:
+      tags: [Audit Logs]
+      summary: Daftar audit log (admin)
+      parameters:
+        - { name: action, in: query, schema: { type: string, enum: [create, update, delete] } }
+        - { name: entity, in: query, schema: { type: string, enum: [user, asset, vulnerability, finding, incident] } }
+        - { name: user_id, in: query, schema: { type: integer } }
+        - { name: sort, in: query, schema: { type: string, default: -created_at, enum: [created_at, -created_at] } }
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  - id: 1
+                    action: update
+                    entity: incident
+                    entity_id: 3
+                    detail: { status: { from: new, to: investigating } }
+                    ip_address: 127.0.0.1
+                    user: { id: 2, name: Rina Analyst, role: analyst }
+                    created_at: "2026-11-24T04:30:00"
+                meta: { page: 1, per_page: 10, total: 1, total_pages: 1 }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/audit-logs/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [Audit Logs]
+      summary: Detail audit log (admin)
+      responses:
+        "200": { description: OK }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/stats/summary:
+    get:
+      tags: [Stats]
+      summary: Ringkasan temuan aktif per severity, insiden per status, dan 5 aset paling berisiko
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              example:
+                success: true
+                data:
+                  total_assets: 8
+                  total_vulnerabilities: 8
+                  active_findings_by_severity: { critical: 2, high: 3, medium: 1, low: 0 }
+                  incidents_by_status: { new: 1, investigating: 2, contained: 1, resolved: 1, closed: 1 }
+                  top_risky_assets:
+                    - { id: 3, name: app-siakad-sim, criticality: high, risk_score: 10, active_findings: 1 }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+    id: { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    q: { name: q, in: query, description: Kata kunci pencarian (maks 100 karakter), schema: { type: string } }
+    page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+    per_page: { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 10 } }
+
+  schemas:
+    Role: { type: string, enum: [admin, analyst, reporter] }
+    Level: { type: string, enum: [low, medium, high, critical] }
+    AssetType: { type: string, enum: [server, workstation, network_device, iot_device, web_application, database] }
+    FindingStatus: { type: string, enum: [open, in_progress, resolved, accepted_risk] }
+    IncidentStatus: { type: string, enum: [new, investigating, contained, resolved, closed] }
+    IncidentCategory: { type: string, enum: [malware, phishing, unauthorized_access, brute_force, dos, data_leak, misconfiguration, other] }
+
+    SuccessBase:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        message: { type: string }
+    Meta:
+      type: object
+      properties:
+        page: { type: integer, example: 1 }
+        per_page: { type: integer, example: 10 }
+        total: { type: integer, example: 8 }
+        total_pages: { type: integer, example: 1 }
+    Error:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        error:
+          type: object
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string, example: Data yang dikirim tidak valid. }
+            details: { type: object, additionalProperties: true }
+
+    UserBrief:
+      type: object
+      properties: { id: { type: integer }, name: { type: string }, role: { $ref: "#/components/schemas/Role" } }
+    User:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        name: { type: string, example: Admin Lab }
+        email: { type: string, example: admin@sectrack.local }
+        role: { $ref: "#/components/schemas/Role" }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    UserCreate:
+      type: object
+      required: [name, email, password]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 100 }
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8, maxLength: 128 }
+        role: { $ref: "#/components/schemas/Role" }
+    UserUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 2, maxLength: 100 }
+        password: { type: string, minLength: 8 }
+        role: { $ref: "#/components/schemas/Role" }
+        is_active: { type: boolean }
+
+    AssetInput:
+      type: object
+      required: [name, asset_type]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 100 }
+        asset_type: { $ref: "#/components/schemas/AssetType" }
+        ip_address: { type: string, nullable: true, example: 10.10.1.40 }
+        location: { type: string, nullable: true, maxLength: 100 }
+        criticality: { allOf: [{ $ref: "#/components/schemas/Level" }], default: medium }
+        description: { type: string, nullable: true, maxLength: 2000 }
+        owner_id: { type: integer, description: Default = user yang membuat }
+    AssetPatch:
+      allOf: [{ $ref: "#/components/schemas/AssetInput" }]
+      description: Sama seperti AssetInput tetapi semua field opsional.
+    Asset:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        name: { type: string, example: srv-web-01 }
+        asset_type: { $ref: "#/components/schemas/AssetType" }
+        ip_address: { type: string, nullable: true, example: 10.10.1.10 }
+        location: { type: string, nullable: true }
+        criticality: { $ref: "#/components/schemas/Level" }
+        description: { type: string, nullable: true }
+        owner: { $ref: "#/components/schemas/UserBrief" }
+        open_findings: { type: integer, description: Jumlah temuan open/in_progress }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AssetList:
+      allOf:
+        - $ref: "#/components/schemas/SuccessBase"
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: "#/components/schemas/Asset" } }
+            meta: { $ref: "#/components/schemas/Meta" }
+
+    VulnerabilityInput:
+      type: object
+      required: [title, severity]
+      properties:
+        cve_id: { type: string, nullable: true, pattern: "^CVE-\\d{4}-\\d{4,7}$" }
+        title: { type: string, minLength: 3, maxLength: 200 }
+        description: { type: string, nullable: true }
+        severity: { $ref: "#/components/schemas/Level" }
+        cvss_score: { type: number, nullable: true, minimum: 0, maximum: 10 }
+        remediation: { type: string, nullable: true }
+    VulnerabilityPatch:
+      allOf: [{ $ref: "#/components/schemas/VulnerabilityInput" }]
+      description: Semua field opsional.
+    Vulnerability:
+      type: object
+      properties:
+        id: { type: integer }
+        cve_id: { type: string, nullable: true, example: CVE-2021-44228 }
+        title: { type: string }
+        description: { type: string, nullable: true }
+        severity: { $ref: "#/components/schemas/Level" }
+        cvss_score: { type: number, nullable: true, example: 10.0 }
+        remediation: { type: string, nullable: true }
+        affected_assets: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    VulnerabilityList:
+      allOf:
+        - $ref: "#/components/schemas/SuccessBase"
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: "#/components/schemas/Vulnerability" } }
+            meta: { $ref: "#/components/schemas/Meta" }
+
+    FindingCreate:
+      type: object
+      required: [asset_id, vulnerability_id]
+      properties:
+        asset_id: { type: integer }
+        vulnerability_id: { type: integer }
+        status: { allOf: [{ $ref: "#/components/schemas/FindingStatus" }], default: open }
+        notes: { type: string, nullable: true, maxLength: 2000 }
+        found_at: { type: string, format: date-time, description: "Default = sekarang, tidak boleh di masa depan" }
+    FindingUpdate:
+      type: object
+      properties:
+        status: { $ref: "#/components/schemas/FindingStatus" }
+        notes: { type: string, nullable: true }
+    Finding:
+      type: object
+      properties:
+        id: { type: integer }
+        status: { $ref: "#/components/schemas/FindingStatus" }
+        notes: { type: string, nullable: true }
+        asset: { type: object, properties: { id: { type: integer }, name: { type: string }, ip_address: { type: string }, criticality: { type: string } } }
+        vulnerability: { type: object, properties: { id: { type: integer }, cve_id: { type: string }, title: { type: string }, severity: { type: string }, cvss_score: { type: number } } }
+        reported_by: { $ref: "#/components/schemas/UserBrief" }
+        found_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    FindingList:
+      allOf:
+        - $ref: "#/components/schemas/SuccessBase"
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: "#/components/schemas/Finding" } }
+            meta: { $ref: "#/components/schemas/Meta" }
+
+    IncidentInput:
+      type: object
+      required: [title, description, category, severity, occurred_at]
+      properties:
+        title: { type: string, minLength: 5, maxLength: 200 }
+        description: { type: string, minLength: 10, maxLength: 5000 }
+        category: { $ref: "#/components/schemas/IncidentCategory" }
+        severity: { $ref: "#/components/schemas/Level" }
+        status: { allOf: [{ $ref: "#/components/schemas/IncidentStatus" }], default: new }
+        asset_id: { type: integer, nullable: true }
+        assignee_id: { type: integer, nullable: true, description: Harus user analyst/admin }
+        occurred_at: { type: string, format: date-time, description: Tidak boleh di masa depan }
+    IncidentPatch:
+      allOf: [{ $ref: "#/components/schemas/IncidentInput" }]
+      description: Semua field opsional.
+    Incident:
+      type: object
+      properties:
+        id: { type: integer }
+        title: { type: string }
+        description: { type: string }
+        category: { $ref: "#/components/schemas/IncidentCategory" }
+        severity: { $ref: "#/components/schemas/Level" }
+        status: { $ref: "#/components/schemas/IncidentStatus" }
+        asset: { type: object, nullable: true }
+        reporter: { $ref: "#/components/schemas/UserBrief" }
+        assignee: { allOf: [{ $ref: "#/components/schemas/UserBrief" }], nullable: true }
+        occurred_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    IncidentList:
+      allOf:
+        - $ref: "#/components/schemas/SuccessBase"
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: "#/components/schemas/Incident" } }
+            meta: { $ref: "#/components/schemas/Meta" }
+
+  responses:
+    UserOne:
+      description: OK
+      content: { application/json: { schema: { allOf: [{ $ref: "#/components/schemas/SuccessBase" }, { type: object, properties: { data: { $ref: "#/components/schemas/User" } } }] } } }
+    UserList:
+      description: OK
+      content: { application/json: { schema: { allOf: [{ $ref: "#/components/schemas/SuccessBase" }, { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/User" } }, meta: { $ref: "#/components/schemas/Meta" } } }] } } }
+    AssetOne:
+      description: OK
+      content: { application/json: { schema: { allOf: [{ $ref: "#/components/schemas/SuccessBase" }, { type: object, properties: { data: { $ref: "#/components/schemas/Asset" } } }] } } }
+    VulnerabilityOne:
+      description: OK
+      content: { application/json: { schema: { allOf: [{ $ref: "#/components/schemas/SuccessBase" }, { type: object, properties: { data: { $ref: "#/components/schemas/Vulnerability" } } }] } } }
+    FindingOne:
+      description: OK
+      content: { application/json: { schema: { allOf: [{ $ref: "#/components/schemas/SuccessBase" }, { type: object, properties: { data: { $ref: "#/components/schemas/Finding" } } }] } } }
+    IncidentOne:
+      description: OK
+      content: { application/json: { schema: { allOf: [{ $ref: "#/components/schemas/SuccessBase" }, { type: object, properties: { data: { $ref: "#/components/schemas/Incident" } } }] } } }
+    BadRequest:
+      description: Parameter/body tidak valid (misalnya sort atau tanggal salah format)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" }, example: { success: false, error: { code: INVALID_QUERY_PARAM, message: "Parameter 'sort' tidak valid." } } } }
+    Unauthorized:
+      description: API key tidak ada / salah
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" }, example: { success: false, error: { code: UNAUTHORIZED, message: Header X-API-Key wajib diisi. } } } }
+    Forbidden:
+      description: Role tidak punya akses
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" }, example: { success: false, error: { code: FORBIDDEN, message: Role kamu tidak punya akses ke aksi ini., details: { required_roles: [admin, analyst], your_role: reporter } } } } }
+    NotFound:
+      description: Data tidak ditemukan
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" }, example: { success: false, error: { code: NOT_FOUND, message: Aset dengan id 99 tidak ditemukan. } } } }
+    Conflict:
+      description: Duplikat atau melanggar integritas data
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" }, example: { success: false, error: { code: CONFLICT, message: Nama aset sudah dipakai., details: { name: srv-web-01 } } } } }
+    UnsupportedMediaType:
+      description: Content-Type bukan application/json
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    ValidationError:
+      description: Validasi input gagal
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" }, example: { success: false, error: { code: VALIDATION_ERROR, message: Data yang dikirim tidak valid., details: { ip_address: ["Format IP address tidak valid (contoh: 192.168.10.5)."] } } } } }
